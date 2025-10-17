@@ -6,7 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		4783ACB62EA26DC4005538E8 /* AcceloCubeProApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4783ACB22EA26DC4005538E8 /* AcceloCubeProApp.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
+		4783ACB22EA26DC4005538E8 /* AcceloCubeProApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcceloCubeProApp.swift; sourceTree = "<group>"; };
 		47D215362E9F6B6600AC2516 /* AcceloCubePro.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AcceloCubePro.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -32,6 +37,7 @@
 		47D2152D2E9F6B6600AC2516 = {
 			isa = PBXGroup;
 			children = (
+				4783ACB22EA26DC4005538E8 /* AcceloCubeProApp.swift */,
 				47D215382E9F6B6600AC2516 /* AcceloCubePro */,
 				47D215372E9F6B6600AC2516 /* Products */,
 			);
@@ -119,6 +125,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4783ACB62EA26DC4005538E8 /* AcceloCubeProApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

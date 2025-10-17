@@ -1,24 +1,23 @@
 
 import Foundation
-import SceneKit
 import CoreMotion
-import SwiftUI
 import simd
 import Combine
 import QuartzCore
 
-// MARK: - Config & Utilities
+// MARK: - Config
 struct MotionConfig {
     var sampleHz: Double = 60
-    var smoothing: Double = 0.2    // 0..1 (low-pass factor)
-    var damping: Double = 0.02     // 0..0.2 per-tick velocity damping
-    var maxSpeed: Float = 5.0      // m/s
-    var maxRange: Float = 2.0      // meters (position clamp)
+    var smoothing: Double = 0.2   // 0..1 (higher = smoother)
+    var damping: Double = 0.02    // 0..0.2 per tick
+    var maxSpeed: Float = 5.0     // m/s
+    var maxRange: Float = 2.0     // m
     var loggingEnabled: Bool = false
 }
 
 @MainActor
 final class MotionVM: ObservableObject {
+
     // Published state for UI/Scene
     @Published var cfg = MotionConfig()
     @Published var quat: simd_quatf = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 0, 1))
@@ -29,22 +28,24 @@ final class MotionVM: ObservableObject {
 
     // Lifecycle
     private let mgr = CMMotionManager()
-    private let queue = OperationQueue()
+    private let queue: OperationQueue = {
+        let q = OperationQueue()
+        q.name = "MotionVM.queue"
+        q.qualityOfService = .userInteractive
+        return q
+    }()
 
     // Kinematics
     private var v: SIMD3<Float> = .zero
     private var lastTimestamp: Double?
 
-    // Calibration: neutral orientation alignment
-    private var neutralInv: simd_quatf = simd_quatf(angle: 0, axis: SIMD3<Float>(0,1,0))
+    // Calibration (neutral orientation)
+    private var neutralInv: simd_quatf = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
 
-    // Logging
+    // Optional logger
     private var logger: CSVLogger? = nil
 
-    init() {
-        queue.name = "MotionVM.queue"
-        queue.qualityOfService = .userInteractive
-    }
+    // MARK: - Public controls
 
     func start() {
         guard CMMotionManager().isDeviceMotionAvailable else {
@@ -53,12 +54,14 @@ final class MotionVM: ObservableObject {
             return
         }
 
-        stop() // ensure clean start
+        stop() // clean start
         usingDeviceMotion = true
         mgr.deviceMotionUpdateInterval = 1.0 / max(1.0, cfg.sampleHz)
+
         lastTimestamp = nil
         v = .zero
         status = "Starting"
+
         if cfg.loggingEnabled {
             logger = CSVLogger(filename: "accelocube_log.csv")
             logger?.writeHeaderIfNeeded()
@@ -66,6 +69,7 @@ final class MotionVM: ObservableObject {
             logger = nil
         }
 
+        // Use a stable reference frame
         mgr.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: queue) { [weak self] dm, err in
             guard let self = self else { return }
             if let err = err {
@@ -75,30 +79,32 @@ final class MotionVM: ObservableObject {
             guard let dm = dm else { return }
 
             let now = CACurrentMediaTime()
-            let ts = dm.timestamp // seconds since boot (monotonic)
+            let ts = dm.timestamp
             let dt: Double
             if let last = self.lastTimestamp { dt = max(0, ts - last) } else { dt = 0 }
             self.lastTimestamp = ts
 
-            // Quaternion from attitude
+            // Attitude → quaternion
             let aq = dm.attitude.quaternion
             var q = simd_quatf(ix: Float(aq.x), iy: Float(aq.y), iz: Float(aq.z), r: Float(aq.w))
-            // Apply neutral calibration
-            q = self.neutralInv * q
+            q = self.neutralInv * q   // apply neutral calibration
 
-            // User acceleration (already gravity-removed) in device frame
+            // User acceleration (gravity already removed by CMDeviceMotion)
             let ua = SIMD3<Float>(Float(dm.userAcceleration.x),
                                   Float(dm.userAcceleration.y),
                                   Float(dm.userAcceleration.z))
-            // Approximate world transform: revert neutral, then apply current q to accel
+
+            // World-ish transform: revert neutral then apply q
             let qWorld = self.neutralInv.inverse * q
             let aWorld = qWorld.act(ua)
 
-            // Integrate with damping/clamps
+            // Integrate with damping and clamps
             var vNew = self.v + aWorld * Float(dt)
             if !vNew.allFinite { vNew = .zero }
             let speed = length(vNew)
-            if speed > self.cfg.maxSpeed { vNew = normalize(vNew) * self.cfg.maxSpeed }
+            if speed > self.cfg.maxSpeed {
+                vNew = normalize(vNew) * self.cfg.maxSpeed
+            }
             vNew *= max(0, 1.0 - Float(self.cfg.damping))
 
             var pNew = self.pos + vNew * Float(dt)
@@ -108,7 +114,7 @@ final class MotionVM: ObservableObject {
                 SIMD3<Float>(repeating:  self.cfg.maxRange)
             )
 
-            // Smooth quaternion (low-pass slerp)
+            // Low-pass slerp for attitude
             let alpha = Float(min(max(self.cfg.smoothing, 0.0), 0.98))
             let qSmoothed = simd_slerp(self.quat, q, 1 - alpha)
 
@@ -117,14 +123,11 @@ final class MotionVM: ObservableObject {
                 self.v = vNew
                 self.pos = pNew
                 self.sampleLatencyMs = (CACurrentMediaTime() - now) * 1000.0
-                self.status = "OK (\(Int(self.cfg.sampleHz)) Hz | v=\(String(format: "%.2f", length(vNew))) m/s | pos=\(self.formatVec(pNew)) m"
+                self.status = "OK \(Int(self.cfg.sampleHz)) Hz | v=\(String(format: "%.2f", length(vNew))) m/s | pos=\(self.formatVec(pNew)) m"
             }
 
             if let logger = self.logger, dt > 0 {
-                logger.writeRow(timestamp: ts,
-                                q: qSmoothed,
-                                userAccel: ua,
-                                pos: pNew)
+                logger.writeRow(timestamp: ts, q: qSmoothed, userAccel: ua, pos: pNew)
             }
         }
     }
@@ -152,11 +155,13 @@ final class MotionVM: ObservableObject {
         if usingDeviceMotion { start() }
     }
 
+    // MARK: - Helpers
     private func formatVec(_ v: SIMD3<Float>) -> String {
         String(format: "%.2f, %.2f, %.2f", v.x, v.y, v.z)
     }
 }
 
+// MARK: - Finite guard
 private extension SIMD3 where Scalar == Float {
     var allFinite: Bool { x.isFinite && y.isFinite && z.isFinite }
 }
@@ -182,10 +187,12 @@ final class CSVLogger {
     }
 
     func writeRow(timestamp: Double, q: simd_quatf, userAccel: SIMD3<Float>, pos: SIMD3<Float>) {
-        let row = String(format: "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
-                         timestamp, q.imag.x, q.imag.y, q.imag.z, q.real,
-                         userAccel.x, userAccel.y, userAccel.z,
-                         pos.x, pos.y, pos.z)
+        let row = String(
+            format: "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+            timestamp, q.imag.x, q.imag.y, q.imag.z, q.real,
+            userAccel.x, userAccel.y, userAccel.z,
+            pos.x, pos.y, pos.z
+        )
         append(text: row)
     }
 
@@ -198,95 +205,14 @@ final class CSVLogger {
                 try handle.write(contentsOf: data)
                 try handle.close()
             } catch {
-                // ignore write errors for logging
+                // ignore logging errors
             }
         } else {
             do {
                 try data.write(to: url)
             } catch {
-                // ignore write errors for logging
+                // ignore logging errors
             }
         }
-    }
-}
-
-// MARK: - SceneKit Bridge
-struct SceneViewBridge: UIViewRepresentable {
-    @ObservedObject var vm: MotionVM
-
-    func makeUIView(context: Context) -> SCNView {
-        let view = SCNView()
-        view.scene = makeScene()
-        view.allowsCameraControl = false
-        view.autoenablesDefaultLighting = false
-        view.backgroundColor = .black
-        context.coordinator.cubeNode = view.scene?.rootNode.childNode(withName: "cube", recursively: true)
-        context.coordinator.cameraNode = view.scene?.rootNode.childNode(withName: "camera", recursively: true)
-        return view
-    }
-
-    func updateUIView(_ view: SCNView, context: Context) {
-        guard let cube = context.coordinator.cubeNode else { return }
-        let q = vm.quat
-        cube.orientation = SCNQuaternion(q.imag.x, q.imag.y, q.imag.z, q.real)
-        cube.position = SCNVector3(vm.pos.x, vm.pos.y, vm.pos.z)
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    final class Coordinator {
-        var cubeNode: SCNNode?
-        var cameraNode: SCNNode?
-    }
-
-    private func makeScene() -> SCNScene {
-        let scene = SCNScene()
-
-        // Ground grid
-        let floor = SCNFloor()
-        floor.firstMaterial?.diffuse.contents = UIColor(white: 0.1, alpha: 1)
-        floor.firstMaterial?.roughness.contents = 0.8
-        let floorNode = SCNNode(geometry: floor)
-        scene.rootNode.addChildNode(floorNode)
-
-        // Cube
-        let box = SCNBox(width: 0.1, height: 0.1, length: 0.1, chamferRadius: 0.01)
-        let mat = SCNMaterial()
-        mat.diffuse.contents = UIColor.systemTeal
-        box.materials = [mat]
-        let cubeNode = SCNNode(geometry: box)
-        cubeNode.name = "cube"
-        cubeNode.position = SCNVector3(0, 50, 0)
-        scene.rootNode.addChildNode(cubeNode)
-
-        // Lights
-        let ambient = SCNLight()
-        ambient.type = .ambient
-        ambient.intensity = 200
-        let ambientNode = SCNNode()
-        ambientNode.light = ambient
-        scene.rootNode.addChildNode(ambientNode)
-
-        let directional = SCNLight()
-        directional.type = .directional
-        directional.intensity = 700
-        let dirNode = SCNNode()
-        dirNode.light = directional
-        dirNode.eulerAngles = SCNVector3(-Float.pi/3, Float.pi/4, 0)
-        scene.rootNode.addChildNode(dirNode)
-
-        // Camera
-        let camera = SCNCamera()
-        camera.zNear = 0.01
-        camera.zFar = 100
-        camera.wantsHDR = true
-        let camNode = SCNNode()
-        camNode.name = "camera"
-        camNode.camera = camera
-        camNode.position = SCNVector3(0, 0.5, 2.0)
-        camNode.look(at: SCNVector3(0, 0.1, 0))
-        scene.rootNode.addChildNode(camNode)
-
-        return scene
     }
 }
